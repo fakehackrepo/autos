@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Contador de Vehículos</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0b0f14; color:#e8edf2; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    overflow:hidden; height:100vh; width:100vw;
+  }
+  #wrap { position:relative; width:100vw; height:100vh; }
+  video, canvas {
+    position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover;
+  }
+  #overlay { pointer-events:none; }
+
+  #topbar {
+    position:absolute; top:0; left:0; right:0; z-index:20;
+    display:flex; justify-content:space-between; align-items:center;
+    padding:14px 16px; background:linear-gradient(180deg, rgba(0,0,0,.65), rgba(0,0,0,0));
+  }
+  #status { font-size:12px; color:#9db1c2; }
+  #status.ready { color:#4ade80; }
+
+  #counterBox {
+    position:absolute; top:64px; left:50%; transform:translateX(-50%);
+    z-index:20; background:rgba(10,14,20,.72); backdrop-filter:blur(6px);
+    border:1px solid rgba(255,255,255,.15); border-radius:16px;
+    padding:10px 22px; text-align:center; min-width:150px;
+  }
+  #counterBox .num { font-size:40px; font-weight:700; line-height:1; color:#4ade80; }
+  #counterBox .label { font-size:11px; color:#9db1c2; margin-top:2px; letter-spacing:.5px; }
+
+  #controls {
+    position:absolute; bottom:0; left:0; right:0; z-index:20;
+    padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom));
+    background:linear-gradient(0deg, rgba(0,0,0,.75), rgba(0,0,0,0));
+    display:flex; flex-direction:column; gap:10px;
+  }
+  .row { display:flex; gap:10px; }
+  button {
+    flex:1; padding:14px; border-radius:12px; border:none; font-size:14px; font-weight:600;
+    cursor:pointer; -webkit-tap-highlight-color:transparent;
+  }
+  #startBtn { background:#4ade80; color:#04220f; }
+  #resetBtn { background:rgba(255,255,255,.12); color:#fff; }
+  #switchBtn { background:rgba(255,255,255,.12); color:#fff; }
+  #lineSlider {
+    width:100%; accent-color:#4ade80;
+  }
+  .sliderLabel { font-size:11px; color:#9db1c2; display:flex; justify-content:space-between; }
+
+  #breakdown {
+    position:absolute; top:150px; left:12px; z-index:20;
+    background:rgba(10,14,20,.72); border-radius:12px; padding:8px 12px;
+    font-size:12px; color:#c9d6e0; display:none;
+  }
+  #breakdown div { display:flex; justify-content:space-between; gap:14px; }
+
+  #hint {
+    position:absolute; z-index:15; top:50%; left:50%; transform:translate(-50%,-50%);
+    color:rgba(255,255,255,.6); font-size:13px; text-align:center; padding:20px;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+
+  <div id="hint">Cargando modelo de IA...<br><span style="font-size:11px">(la primera vez puede tardar unos segundos)</span></div>
+
+  <div id="topbar">
+    <span id="status">Iniciando...</span>
+  </div>
+
+  <div id="counterBox">
+    <div class="num" id="count">0</div>
+    <div class="label">VEHÍCULOS</div>
+  </div>
+
+  <div id="breakdown"></div>
+
+  <div id="controls">
+    <div class="sliderLabel"><span>Posición de la línea de conteo</span></div>
+    <input type="range" id="lineSlider" min="10" max="90" value="55">
+    <div class="row">
+      <button id="startBtn">▶ Iniciar cámara</button>
+      <button id="switchBtn">🔄 Cambiar cámara</button>
+    </div>
+    <div class="row">
+      <button id="resetBtn">↺ Reiniciar contador</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Cargador de scripts con CDNs de respaldo, por si uno falla en la red del usuario
+function loadScript(urls) {
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    function tryNext() {
+      if (i >= urls.length) return reject(new Error('Todos los CDN fallaron para: ' + urls[0]));
+      const s = document.createElement('script');
+      s.src = urls[i];
+      s.onload = () => resolve(urls[i]);
+      s.onerror = () => { i++; tryNext(); };
+      document.head.appendChild(s);
+    }
+    tryNext();
+  });
+}
+
+const TF_URLS = [
+  'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js',
+  'https://unpkg.com/@tensorflow/tfjs@4.20.0/dist/tf.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.20.0/tf.min.js'
+];
+const COCO_URLS = [
+  'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js',
+  'https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
+];
+
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const ctx = overlay.getContext('2d');
+const statusEl = document.getElementById('status');
+const countEl = document.getElementById('count');
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+const resetBtn = document.getElementById('resetBtn');
+const switchBtn = document.getElementById('switchBtn');
+const lineSlider = document.getElementById('lineSlider');
+const breakdown = document.getElementById('breakdown');
+
+const VEHICLE_CLASSES = ['car', 'truck', 'bus', 'motorcycle'];
+let model = null;
+let modelPromise = null;
+let stream = null;
+let running = false;
+let facingMode = 'environment'; // cámara trasera por defecto
+let count = 0;
+let counts = { car:0, truck:0, bus:0, motorcycle:0 };
+let trackedObjects = []; // {id, x, y, lastSeen, counted}
+let nextId = 0;
+let linePos = 0.55; // fracción horizontal (0 a 1) — línea vertical para carretera vista de lado
+const DETECT_INTERVAL_MS = 120; // ~8 FPS de detección, suficiente para contar autos y más liviano
+
+lineSlider.addEventListener('input', e => {
+  linePos = e.target.value / 100;
+});
+
+function log(msg) {
+  console.log(msg);
+  hint.style.display = 'block';
+  hint.innerHTML += `<br><span style="font-size:10px;opacity:.7">${msg}</span>`;
+}
+
+async function loadModel() {
+  if (modelPromise) return modelPromise;
+  modelPromise = (async () => {
+    try {
+      statusEl.textContent = 'Cargando modelo IA...';
+      log('Descargando TensorFlow.js...');
+      await loadScript(TF_URLS);
+      log('TensorFlow.js cargado ✓');
+
+      log('Descargando COCO-SSD...');
+      await loadScript(COCO_URLS);
+      log('COCO-SSD cargado ✓');
+
+      tf.enableProdMode();
+
+      // intenta webgl (rápido, usa GPU); si falla, cae a wasm o cpu
+      try {
+        await tf.setBackend('webgl');
+        await tf.ready();
+        log('Backend: webgl ✓');
+      } catch (eWebgl) {
+        log('webgl falló, probando cpu...');
+        await tf.setBackend('cpu');
+        await tf.ready();
+        log('Backend: cpu ✓ (más lento)');
+      }
+
+      log('Descargando modelo COCO-SSD...');
+      model = await coco_ssd.load({ base: 'lite_mobilenet_v2' });
+      log('Modelo descargado ✓');
+
+      // warm-up: si falla, no es crítico, seguimos igual
+      try {
+        const warm = tf.zeros([300, 300, 3]);
+        await model.detect(warm);
+        warm.dispose();
+      } catch (eWarm) {
+        log('Warm-up omitido: ' + eWarm.message);
+      }
+
+      statusEl.textContent = 'Modelo listo';
+      statusEl.classList.add('ready');
+      hint.style.display = 'none';
+      hint.innerHTML = '';
+    } catch (e) {
+      statusEl.textContent = 'Error al cargar modelo';
+      log('ERROR: ' + e.message);
+      throw e;
+    }
+  })();
+  return modelPromise;
+}
+
+async function startCamera() {
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await new Promise(res => video.onloadedmetadata = res);
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    running = true;
+    statusEl.textContent = 'Detectando...';
+    detectLoop();
+  } catch (err) {
+    statusEl.textContent = 'Error de cámara: ' + err.message;
+    hint.style.display = 'block';
+    hint.textContent = 'No se pudo acceder a la cámara. Revisa los permisos.';
+  }
+}
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+async function detectLoop() {
+  if (!running || !model) return;
+  const predictions = await model.detect(video);
+
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+  // línea de conteo vertical
+  const lineX = overlay.width * linePos;
+  ctx.strokeStyle = '#4ade80';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([10, 8]);
+  ctx.beginPath();
+  ctx.moveTo(lineX, 0);
+  ctx.lineTo(lineX, overlay.height);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const now = Date.now();
+  const detectedCenters = [];
+
+  predictions.forEach(pred => {
+    if (!VEHICLE_CLASSES.includes(pred.class)) return;
+    const [x, y, w, h] = pred.bbox;
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    detectedCenters.push({ cx, cy, cls: pred.class, box: [x, y, w, h], score: pred.score });
+
+    // dibujar caja
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = 'rgba(74,222,128,.85)';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(`${pred.class} ${(pred.score*100).toFixed(0)}%`, x, y > 16 ? y - 5 : y + 14);
+  });
+
+  // matching simple: asociar detecciones con objetos ya trackeados por cercanía
+  const usedTracks = new Set();
+  detectedCenters.forEach(det => {
+    let bestTrack = null;
+    let bestDist = 80; // umbral de distancia en px
+    trackedObjects.forEach(t => {
+      if (usedTracks.has(t.id)) return;
+      const d = dist({x:det.cx,y:det.cy}, {x:t.x,y:t.y});
+      if (d < bestDist) { bestDist = d; bestTrack = t; }
+    });
+
+    if (bestTrack) {
+      // verificar cruce de línea
+      const wasLeft = bestTrack.x < lineX;
+      const isLeft = det.cx < lineX;
+      if (!bestTrack.counted && wasLeft !== isLeft) {
+        count++;
+        counts[det.cls] = (counts[det.cls] || 0) + 1;
+        countEl.textContent = count;
+        updateBreakdown();
+        bestTrack.counted = true;
+        flashLine();
+      }
+      bestTrack.x = det.cx;
+      bestTrack.y = det.cy;
+      bestTrack.lastSeen = now;
+      usedTracks.add(bestTrack.id);
+    } else {
+      trackedObjects.push({ id: nextId++, x: det.cx, y: det.cy, lastSeen: now, counted: false });
+    }
+  });
+
+  // limpiar tracks viejos (no vistos en 600ms)
+  trackedObjects = trackedObjects.filter(t => now - t.lastSeen < 600);
+
+  setTimeout(detectLoop, DETECT_INTERVAL_MS);
+}
+
+function flashLine() {
+  overlay.style.filter = 'brightness(1.4)';
+  setTimeout(() => overlay.style.filter = 'none', 150);
+}
+
+function updateBreakdown() {
+  breakdown.style.display = 'block';
+  breakdown.innerHTML = Object.entries(counts)
+    .filter(([,v]) => v > 0)
+    .map(([k,v]) => `<div><span>${k}</span><span>${v}</span></div>`)
+    .join('');
+}
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = 'Cargando...';
+  try {
+    await Promise.all([loadModel(), startCamera()]);
+    startBtn.textContent = '▶ Iniciar cámara';
+  } catch (e) {
+    startBtn.textContent = '⚠ Error, toca para reintentar';
+    modelPromise = null; // permite reintentar
+  }
+  startBtn.disabled = false;
+});
+
+switchBtn.addEventListener('click', async () => {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  if (running) await startCamera();
+});
+
+resetBtn.addEventListener('click', () => {
+  count = 0;
+  counts = { car:0, truck:0, bus:0, motorcycle:0 };
+  countEl.textContent = 0;
+  trackedObjects = [];
+  breakdown.style.display = 'none';
+});
+
+// precargar modelo apenas se abre la página, para que esté listo (o casi)
+// cuando el usuario toque "Iniciar cámara"
+loadModel();
+</script>
+</body>
+</html>
