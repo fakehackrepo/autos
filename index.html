@@ -98,9 +98,33 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <script>
+// Cargador de scripts con CDNs de respaldo, por si uno falla en la red del usuario
+function loadScript(urls) {
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    function tryNext() {
+      if (i >= urls.length) return reject(new Error('Todos los CDN fallaron para: ' + urls[0]));
+      const s = document.createElement('script');
+      s.src = urls[i];
+      s.onload = () => resolve(urls[i]);
+      s.onerror = () => { i++; tryNext(); };
+      document.head.appendChild(s);
+    }
+    tryNext();
+  });
+}
+
+const TF_URLS = [
+  'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js',
+  'https://unpkg.com/@tensorflow/tfjs@4.20.0/dist/tf.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.20.0/tf.min.js'
+];
+const COCO_URLS = [
+  'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js',
+  'https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
+];
+
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
@@ -141,7 +165,14 @@ async function loadModel() {
   modelPromise = (async () => {
     try {
       statusEl.textContent = 'Cargando modelo IA...';
-      log('Iniciando TensorFlow...');
+      log('Descargando TensorFlow.js...');
+      await loadScript(TF_URLS);
+      log('TensorFlow.js cargado ✓');
+
+      log('Descargando COCO-SSD...');
+      await loadScript(COCO_URLS);
+      log('COCO-SSD cargado ✓');
+
       tf.enableProdMode();
 
       // intenta webgl (rápido, usa GPU); si falla, cae a wasm o cpu
